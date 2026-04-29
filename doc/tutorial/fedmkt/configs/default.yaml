@@ -33,24 +33,24 @@ data_prepare:
   seed: 42
 
 paths:
-  llm_pretrained: "/home/cmcc/went/models/gemma-12b"  # ../../../models/llama-2-7b-hf ; /home/cmcc/went/Llama-2-13b-hf
+  llm_pretrained: "/home/cmcc/went/models/Llama-2-13b-hf"  # ../../../models/llama-2-7b-hf ; /home/cmcc/went/Llama-2-13b-hf
   #/home/cmcc/went/models/gemma-12b
   slm_pretrained:
     - "/home/cmcc/went/fate1/models/opt-1.3b"
     - "/home/cmcc/went/fate1/models/gpt2-xl"
     - "/home/cmcc/went/fate1/models/Sheared-LLaMA-1.3B"
     - "/home/cmcc/went/fate1/models/bloom-1b1"
-  vocab_mapping_dir: "../mapping"
+  vocab_mapping_dir: "/home/cmcc/went/fate1/doc/tutorial/fedmkt/mapping"
   slm_to_llm_vocab_mappings:
-    - "opt_to_gemma.json"              #"opt_to_gemma.json" 、"opt_to_llama.json"
-    - "gpt2_to_gemma.json"             #"gpt2_to_gemma.json" 、"gpt2_to_llama.json"
-    - "llama_small_to_gemma.json"      #"llama_small_to_gemma.json"、 "llama_small_to_llama.json"
-    - "bloom_to_gemma.json"           #"bloom_to_gemma.json"、 "bloom_to_llama.json"
+    - "opt_to_llama.json"              #"opt_to_gemma.json" 、"opt_to_llama.json"
+    - "gpt2_to_llama.json"             #"gpt2_to_gemma.json" 、"gpt2_to_llama.json"
+    - "llama_small_to_llama.json"      #"llama_small_to_gemma.json"、 "llama_small_to_llama.json"
+    - "bloom_to_llama.json"           #"bloom_to_gemma.json"、 "bloom_to_llama.json"
   llm_to_slm_vocab_mappings:
-    - "gemma_to_opt.json"            #"gemma_to_opt.json"、  "llama_to_opt.json"
-    - "gemma_to_gpt2.json"          #"gemma_to_gpt2.json" 、 "llama_to_gpt2.json"
-    - "gemma_to_llama_small.json"        #"gemma_to_llama_small.json" 、"llama_to_llama_small"
-    - "gemma_to_bloom.json"         #"gemma_to_bloom.json" 、"llama_to_bloom.json"
+    - "llama_to_opt.json"            #"gemma_to_opt.json"、  "llama_to_opt.json"
+    - "llama_to_gpt2.json"          #"gemma_to_gpt2.json" 、 "llama_to_gpt2.json"
+    - "llama_to_llama_small"        #"gemma_to_llama_small.json" 、"llama_to_llama_small"
+    - "llama_to_bloom.json"         #"gemma_to_bloom.json" 、"llama_to_bloom.json"
   training_output_dir: "../../../../."
   llm_model_save_dir: "./models/fedmkt_4_slms_llm_model"
   slm_model_save_dirs:
