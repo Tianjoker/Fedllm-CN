@@ -18,6 +18,7 @@
 #  limitations under the License.
 #
 import logging
+import inspect
 import torch
 from torch.nn.functional import kl_div, log_softmax, cross_entropy
 from transformers import Seq2SeqTrainer
@@ -31,6 +32,27 @@ from fate_llm.algo.fedmkt.utils.vars_define import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _tokenizer_init_kwargs(trainer_cls, tokenizer):
+    if tokenizer is None:
+        return {}
+
+    init_params = inspect.signature(trainer_cls.__init__).parameters
+    if "processing_class" in init_params:
+        return {"processing_class": tokenizer}
+    return {"tokenizer": tokenizer}
+
+
+def _prepare_dispatched_model_for_trainer(model):
+    if model is None:
+        return
+
+    has_device_map = getattr(model, "hf_device_map", None) is not None
+    has_meta_params = any(param.is_meta for param in model.parameters())
+    if has_device_map or has_meta_params:
+        model.is_parallelizable = True
+        model.model_parallel = True
 
 
 class FedMKTTrainer(Seq2SeqTrainer):
@@ -49,6 +71,10 @@ class FedMKTTrainer(Seq2SeqTrainer):
         distill_strategy = kwargs.pop("distill_strategy", "greater")
         loss_log_prefix = kwargs.pop("loss_log_prefix", "fedmkt")
         loss_log_every_n_steps = kwargs.pop("loss_log_every_n_steps", 20)
+        round_idx = kwargs.pop("round_idx", None)
+        tokenizer = kwargs.pop("tokenizer", None)
+        kwargs.update(_tokenizer_init_kwargs(Seq2SeqTrainer, tokenizer))
+        _prepare_dispatched_model_for_trainer(kwargs.get("model", args[0] if args else None))
         super(FedMKTTrainer, self).__init__(*args, **kwargs)
         self.blending_num = blending_num
         self.distill_loss_type = distill_loss_type
@@ -56,9 +82,10 @@ class FedMKTTrainer(Seq2SeqTrainer):
         self.distill_strategy = distill_strategy
         self.loss_log_prefix = loss_log_prefix
         self.loss_log_every_n_steps = max(1, int(loss_log_every_n_steps))
+        self.round_idx = round_idx
         self._loss_log_count = 0
 
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         if self.label_smoother is not None and "labels" in inputs:
             labels = inputs.pop("labels")
         else:
@@ -76,8 +103,9 @@ class FedMKTTrainer(Seq2SeqTrainer):
         outputs = model(**inputs)
         # Save past state if it exists
         # TODO: this needs to be fixed and made cleaner later.
-        if self.args.past_index >= 0:
-            self._past = outputs[self.args.past_index]
+        past_index = getattr(self.args, "past_index", -1)
+        if past_index >= 0:
+            self._past = outputs[past_index]
 
         if labels is not None:
             if unwrap_model(model)._get_name() in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES.values():
@@ -105,24 +133,14 @@ class FedMKTTrainer(Seq2SeqTrainer):
         #把所有 SLM 的分布堆在一起。在每个位置上，选择 reward 最大的那个模型的分布 作为 teacher。
         #aligned_target_dist: [batch, seq_len, vocab_size_llm]
         if self.distill_strategy == "greater":
-            base_reward_expanded = base_reward.unsqueeze(-1).unsqueeze(-1).expand_as(base_target_dist)
-            aligned_rewards_expanded = [
-                aligned_rewards[i].unsqueeze(-1).unsqueeze(-1).expand_as(aligned_target_dists[i])
-                for i in range(self.blending_num)
-            ]
-            target_dist_list = []
-            reward_list = []
-            if base_target_dist is not None:
-                target_dist_list.append(base_target_dist)
-                reward_list.append(base_reward_expanded)
-
-            target_dist_list.extend(aligned_target_dists)
-            reward_list.extend(aligned_rewards_expanded)
-
-            stacked_dists = torch.stack(target_dist_list, dim=-1)
-            stacked_rewards = torch.stack(reward_list, dim=-1)
-            max_reward_indices = torch.argmax(stacked_rewards, dim=-1, keepdim=True)
-            target_dist = torch.gather(stacked_dists, -1, max_reward_indices).squeeze(-1)
+            rewards = torch.stack([base_reward] + aligned_rewards, dim=1)
+            best_teacher_indices = torch.argmax(rewards, dim=1)
+            target_dist_candidates = [base_target_dist] + aligned_target_dists
+            target_dist = torch.empty_like(base_target_dist)
+            for teacher_idx, candidate_dist in enumerate(target_dist_candidates):
+                row_mask = best_teacher_indices == teacher_idx
+                if row_mask.any():
+                    target_dist[row_mask] = candidate_dist[row_mask]
         #对所有模型的分布做 softmax 加权平均
         elif self.distill_strategy == "weighted_mean":
             weights = torch.stack(
@@ -172,8 +190,14 @@ class FedMKTTrainer(Seq2SeqTrainer):
         distill_value = float(distill_loss.detach().float().cpu())
         supervised_weighted = self.lm_loss_weight * supervised_value
         distill_weighted = (1.0 - self.lm_loss_weight) * distill_value
+        round_value = -1 if self.round_idx is None else int(self.round_idx)
+        loss_step = self.state.global_step if self.round_idx is None else round_value * 100000 + self.state.global_step
 
         metrics = {
+            f"{self.loss_log_prefix}/fedmkt_round": round_value,
+            f"{self.loss_log_prefix}/fedmkt_loss_step": int(loss_step),
+            f"{self.loss_log_prefix}/trainer_global_step": int(self.state.global_step),
+            f"{self.loss_log_prefix}/loss_log_count": int(self._loss_log_count),
             f"{self.loss_log_prefix}/total_loss": total_value,
             f"{self.loss_log_prefix}/supervised_lm_loss": supervised_value,
             f"{self.loss_log_prefix}/distill_loss": distill_value,

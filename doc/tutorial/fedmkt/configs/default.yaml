@@ -11,7 +11,7 @@ data:
       data_dir: "/home/cmcc/went/data/arc_c"
     arc_e:
       dataset_name: arc_easy
-      data_dir: "/home/cmcc/went/data//arc_e"
+      data_dir: "/home/cmcc/went/data/arc_e"
     rte:
       dataset_name: rte
       data_dir: "/home/cmcc/went/data/rte"
@@ -33,24 +33,24 @@ data_prepare:
   seed: 42
 
 paths:
-  llm_pretrained: "/home/cmcc/went/models/Llama-2-13b-hf"  # ../../../models/llama-2-7b-hf ; /home/cmcc/went/Llama-2-13b-hf
-  #/home/cmcc/went/models/gemma-12b
+  llm_pretrained: "/home/cmcc/went/models/Qwen2.5-14B-Instruct"  # ../../../models/llama-2-7b-hf ; /home/cmcc/went/models/Llama-2-13b-hf
+  #/home/cmcc/went/models/gemma-12b  "/home/cmcc/went/models/Qwen2.5-14B-Instruct"
   slm_pretrained:
     - "/home/cmcc/went/fate1/models/opt-1.3b"
     - "/home/cmcc/went/fate1/models/gpt2-xl"
     - "/home/cmcc/went/fate1/models/Sheared-LLaMA-1.3B"
     - "/home/cmcc/went/fate1/models/bloom-1b1"
   vocab_mapping_dir: "/home/cmcc/went/fate1/doc/tutorial/fedmkt/mapping"
-  slm_to_llm_vocab_mappings:
-    - "opt_to_llama.json"              #"opt_to_gemma.json" 、"opt_to_llama.json"
-    - "gpt2_to_llama.json"             #"gpt2_to_gemma.json" 、"gpt2_to_llama.json"
-    - "llama_small_to_llama.json"      #"llama_small_to_gemma.json"、 "llama_small_to_llama.json"
-    - "bloom_to_llama.json"           #"bloom_to_gemma.json"、 "bloom_to_llama.json"
-  llm_to_slm_vocab_mappings:
-    - "llama_to_opt.json"            #"gemma_to_opt.json"、  "llama_to_opt.json"
-    - "llama_to_gpt2.json"          #"gemma_to_gpt2.json" 、 "llama_to_gpt2.json"
-    - "llama_to_llama_small"        #"gemma_to_llama_small.json" 、"llama_to_llama_small"
-    - "llama_to_bloom.json"         #"gemma_to_bloom.json" 、"llama_to_bloom.json"
+#  slm_to_llm_vocab_mappings:
+#    - "opt_to_qwen2_5.json"              #"opt_to_gemma.json" 、"opt_to_llama.json"  "opt_to_qwen2_5.json"
+#    - "gpt2_to_qwen2_5.json"             #"gpt2_to_gemma.json" 、"gpt2_to_llama.json" "gpt2_to_qwen2_5.json"
+#    - "llama_small_to_qwen2_5.json"      #"llama_small_to_gemma.json"、 "llama_small_to_llama.json" "llama_small_to_qwen2_5.json"
+#    - "bloom_to_qwen2_5.json"           #"bloom_to_gemma.json"、 "bloom_to_llama.json" "bloom_to_qwen2_5.json"
+#  llm_to_slm_vocab_mappings:
+#    - "qwen2_5_to_opt.json"            #"gemma_to_opt.json"、  "llama_to_opt.json" "qwen2_5_to_opt.json"
+#    - "qwen2_5_to_gpt2.json"          #"gemma_to_gpt2.json" 、 "llama_to_gpt2.json" "qwen2_5_to_gpt2.json"
+#    - "qwen2_5_to_llama_small.json"        #"gemma_to_llama_small.json" 、"llama_to_llama_small" "qwen2_5_to_llama_small.json"
+#    - "qwen2_5_to_bloom.json"         #"gemma_to_bloom.json" 、"llama_to_bloom.json" "qwen2_5_to_bloom.json"
   training_output_dir: "../../../../."
   llm_model_save_dir: "./models/fedmkt_4_slms_llm_model"
   slm_model_save_dirs:
@@ -109,7 +109,7 @@ training:
 runtime:
   # The arbiter is the center LLM process. Use comma-separated ids to expose
   # multiple GPUs to that one process, for example "2,3,4".
-  arbiter_cuda_visible_devices: "1，2"  #中心服务器默认可见
+  arbiter_cuda_visible_devices: "1,2,3"  #中心服务器默认可见
   guest_cuda_visible_devices: "4"
   host_cuda_visible_devices:
     "9999": "5"
@@ -117,9 +117,9 @@ runtime:
     "10001": "7"
 
 mmlcc:
-  use_aggregation: false
+  use_aggregation: True
   probability_epsilon: 1.0e-12
-  num_blocks: 1
+  num_blocks: 2
   privacy_guarantee: 1
   beta_radius: 1.15
   noise_sigma: 1.0

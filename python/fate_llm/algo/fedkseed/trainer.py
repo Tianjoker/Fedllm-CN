@@ -13,6 +13,7 @@ from transformers.trainer_callback import TrainerCallback
 from fate_llm.algo.fedkseed.args import KSeedTrainingArguments
 from fate_llm.algo.fedkseed.optimizer import KSeedZerothOrderOptimizer
 from fate_llm.algo.fedkseed.pytorch_utils import get_optimizer_parameters_grouped_with_decay
+from fate_llm.trainer.seq2seq_trainer import _tokenizer_init_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -39,12 +40,12 @@ class KSeedZOExtendedTrainer(Trainer):
             data_collator=data_collator,
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
-            tokenizer=tokenizer,
             model_init=model_init,
             compute_metrics=compute_metrics,
             callbacks=callbacks,
             optimizers=optimizers,
             preprocess_logits_for_metrics=preprocess_logits_for_metrics,
+            **_tokenizer_init_kwargs(Trainer, tokenizer),
         )
         self.kseed_args = kseed_args
         self._kseed_optimizer = None
@@ -71,7 +72,13 @@ class KSeedZOExtendedTrainer(Trainer):
     def k_seed_zo_mode(args):
         return hasattr(args, "zo_optim") and args.zo_optim
 
-    def training_step(self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]]) -> torch.Tensor:
+    def training_step(
+        self,
+        model: nn.Module,
+        inputs: Dict[str, Union[torch.Tensor, Any]],
+        num_items_in_batch=None,
+        **kwargs,
+    ) -> torch.Tensor:
         """
         hook to do the step with KSeedZerothOrderOptimizer
         """
@@ -96,7 +103,10 @@ class KSeedZOExtendedTrainer(Trainer):
                 loss = self._kseed_optimizer.kseed_zeroth_order_step(closure=closure)
                 return loss.detach()
         else:
-            return super().training_step(model, inputs)
+            try:
+                return super().training_step(model, inputs, num_items_in_batch=num_items_in_batch)
+            except TypeError:
+                return super().training_step(model, inputs)
 
     def create_optimizer_and_scheduler(self, num_training_steps: int):
         """

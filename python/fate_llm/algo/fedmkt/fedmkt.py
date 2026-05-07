@@ -17,6 +17,7 @@ import torch
 import logging
 import datasets
 import os
+import inspect
 from dataclasses import dataclass, field
 
 import transformers
@@ -42,6 +43,68 @@ from fate_llm.algo.fedmkt.mmlcc import aggregate_aligned_slm_teachers_dataset
 
 
 logger = logging.getLogger(__name__)
+
+
+def _tokenizer_init_kwargs(trainer_cls, tokenizer):
+    if tokenizer is None:
+        return {}
+
+    init_params = inspect.signature(trainer_cls.__init__).parameters
+    if "processing_class" in init_params:
+        return {"processing_class": tokenizer}
+    return {"tokenizer": tokenizer}
+
+
+def _get_hf_device_map(model):
+    seen = set()
+    candidates = [model]
+    while candidates:
+        candidate = candidates.pop()
+        if candidate is None or id(candidate) in seen:
+            continue
+        seen.add(id(candidate))
+
+        device_map = getattr(candidate, "hf_device_map", None)
+        if device_map is not None:
+            return device_map
+
+        for attr_name in ("module", "_pe_lm", "base_model", "model"):
+            child = getattr(candidate, attr_name, None)
+            if child is not None and child is not candidate:
+                candidates.append(child)
+
+    return None
+
+
+def _has_meta_parameters(model):
+    return any(param.is_meta for param in model.parameters())
+
+
+def _move_model_to_training_device(model, device):
+    if device.type != "cuda":
+        return
+
+    device_map = _get_hf_device_map(model)
+    if device_map is not None:
+        logger.info(f"skip moving model to {device}; model is already dispatched by hf device_map={device_map}")
+        return
+
+    if _has_meta_parameters(model):
+        logger.info(f"skip moving model to {device}; model contains meta tensors managed by lazy loading/offload")
+        return
+
+    model.cuda(device)
+
+
+def _prepare_dispatched_model_for_trainer(model):
+    if model is None:
+        return
+
+    has_device_map = _get_hf_device_map(model) is not None
+    has_meta_params = _has_meta_parameters(model)
+    if has_device_map or has_meta_params:
+        model.is_parallelizable = True
+        model.model_parallel = True
 
 
 def _wandb_is_active(wandb_module):
@@ -98,7 +161,7 @@ def _log_round_arc_accuracy(model, tokenizer, round_idx: int, prefix: str):
     )
 
     log_metrics = {
-        "round": int(round_idx),
+        f"{prefix}/fedmkt_round": int(round_idx),
         f"{prefix}/arc_mc_accuracy": metrics["arc_mc_accuracy"],
         f"{prefix}/arc_mc_avg_choice_loss": metrics["arc_mc_avg_choice_loss"],
         f"{prefix}/arc_mc_num_examples": metrics["arc_mc_num_examples"],
@@ -325,11 +388,12 @@ class FedMKTSLM(FedMKTBase):
         llm_pub_logits = None
         for i, iter_ctx in self.ctx.on_iterations.ctxs_range(global_epochs):
             logger.info(f"begin {i}-th global kd process")
+            self._fedmkt_current_round = i
             priv_data_training_args = self._get_priv_data_training_args()
+            _prepare_dispatched_model_for_trainer(self.model)
 
             priv_trainer = Seq2SeqTrainer(
                 model=self.model,
-                tokenizer=self.tokenizer,
                 data_collator=self.priv_data_collator,
                 train_dataset=self.priv_train_set,
                 args=priv_data_training_args,
@@ -337,7 +401,8 @@ class FedMKTSLM(FedMKTBase):
                 compute_metrics=self.compute_metrics,
                 callbacks=self.callbacks,
                 optimizers=(self.priv_optimizer, self.priv_scheduler),
-                preprocess_logits_for_metrics=self.preprocess_logits_for_metrics
+                preprocess_logits_for_metrics=self.preprocess_logits_for_metrics,
+                **_tokenizer_init_kwargs(Seq2SeqTrainer, self.tokenizer),
             )
 
             logger.info(f"begin {i}-th private data training process")
@@ -353,7 +418,7 @@ class FedMKTSLM(FedMKTBase):
                     batched=True,
                     batch_size=self.training_args.per_device_train_batch_size,
                     num_proc=None,
-                    load_from_cache_file=True,
+                    load_from_cache_file=False,
                     fn_kwargs={"model": self.model,
                                "training_args": self.training_args,
                                "data_collator": transformers.DataCollatorForSeq2Seq(self.tokenizer)}
@@ -410,7 +475,6 @@ class FedMKTSLM(FedMKTBase):
         public_data_training_args = self._get_pub_data_kd_training_args()
         fedmkt_trainer = FedMKTTrainer(
             model=self.model,
-            tokenizer=self.tokenizer,
             args=public_data_training_args,
             train_dataset=train_set,
             eval_dataset=self.val_set,
@@ -428,6 +492,8 @@ class FedMKTSLM(FedMKTBase):
             distill_loss_type=self.training_args.distill_loss_type,
             distill_strategy=self.training_args.distill_strategy,
             loss_log_prefix="client",
+            round_idx=getattr(self, "_fedmkt_current_round", None),
+            **_tokenizer_init_kwargs(FedMKTTrainer, self.tokenizer),
         )
 
         return fedmkt_trainer
@@ -512,8 +578,8 @@ class FedMKTLLM(FedMKTBase):
                      "training_args": self.training_args,
                      "data_collator": transformers.DataCollatorForSeq2Seq(self.tokenizer)}
         #把样本打包成 batch
-        if first_epoch and self.training_args.device.type == "cuda":
-            self.model.cuda(self.training_args.device)
+        if first_epoch:
+            _move_model_to_training_device(self.model, self.training_args.device)
         #调用 HuggingFace datasets.map() 方法，批量跑 generate_pub_data_logits 函数
         #此处的generate_pub_data_logits方法参考generate_logits_utils文件
         return self.train_set.map(
@@ -521,7 +587,7 @@ class FedMKTLLM(FedMKTBase):
             batched=True,
             batch_size=self.training_args.per_device_train_batch_size,
             num_proc=None,
-            load_from_cache_file=True,
+            load_from_cache_file=False,
             fn_kwargs=fn_kwargs
         )
 
@@ -591,17 +657,12 @@ class FedMKTLLM(FedMKTBase):
         #greedy matching（贪心对齐）subword merge（子词合并）embedding similarity（用向量相似度对齐）
 
         if self.training_args.use_mmlcc_aggregation:
-            if self.training_args.mmlcc_num_blocks != 1:
-                raise ValueError(
-                    "The stable FedMKT MMLCC integration currently supports "
-                    "mmlcc_num_blocks=1 only: each sample/token-position "
-                    "teacher vector is encoded as one block."
-                )
             aligned_dataset, mmlcc_metrics = aggregate_aligned_slm_teachers_dataset(
                 aligned_dataset=aligned_dataset,
                 blending_num=len(slm_pub_logits_list),
                 distill_temperature=self.training_args.distill_temperature,
                 probability_epsilon=self.training_args.mmlcc_probability_epsilon,
+                num_blocks=self.training_args.mmlcc_num_blocks,
                 privacy_guarantee=self.training_args.mmlcc_privacy_guarantee,
                 beta_radius=self.training_args.mmlcc_beta_radius,
                 noise_sigma=self.training_args.mmlcc_noise_sigma,
@@ -620,7 +681,7 @@ class FedMKTLLM(FedMKTBase):
             try:
                 import wandb
                 log_metrics = {
-                    "round": int(epoch_idx),
+                    "server/fedmkt_round": int(epoch_idx),
                     "server/mmlcc_relative_error": mmlcc_metrics["relative_error"],
                     "server/mmlcc_positions": mmlcc_metrics["positions"],
                     "server/mmlcc_num_blocks_K": mmlcc_metrics["num_blocks"],
@@ -632,7 +693,7 @@ class FedMKTLLM(FedMKTBase):
             except ImportError:
                 _swanlab_log(
                     {
-                        "round": int(epoch_idx),
+                        "server/fedmkt_round": int(epoch_idx),
                         "server/mmlcc_relative_error": mmlcc_metrics["relative_error"],
                         "server/mmlcc_positions": mmlcc_metrics["positions"],
                         "server/mmlcc_num_blocks_K": mmlcc_metrics["num_blocks"],
@@ -680,6 +741,7 @@ class FedMKTLLM(FedMKTBase):
 
         for i, iter_ctx in self.ctx.on_iterations.ctxs_range(global_epochs):
             logger.info(f"begin {i}-th global kd process")
+            self._fedmkt_current_round = i
 
             aligend_train_set = self.on_epoch_begin(iter_ctx, i, previous_pub_logits)
             if self.training_args.llm_training:
@@ -687,7 +749,6 @@ class FedMKTLLM(FedMKTBase):
                 blending_num = 1 if self.training_args.use_mmlcc_aggregation else len(self.slm_tokenizers)
                 fedmkt_trainer = FedMKTTrainer(
                     model=self.model,
-                    tokenizer=self.tokenizer,
                     args=public_data_training_args,
                     train_dataset=aligend_train_set,
                     eval_dataset=self.val_set,
@@ -705,6 +766,8 @@ class FedMKTLLM(FedMKTBase):
                     distill_loss_type=self.training_args.distill_loss_type,
                     distill_strategy=self.training_args.distill_strategy,
                     loss_log_prefix="server",
+                    round_idx=i,
+                    **_tokenizer_init_kwargs(FedMKTTrainer, self.tokenizer),
                 )
 
                 fedmkt_trainer.train()

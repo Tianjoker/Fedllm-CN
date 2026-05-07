@@ -1,3 +1,8 @@
+server03部署目录：
+```text
+home/cmcc/went/fate1
+```
+
 # FedMKT 多模型联邦知识迁移项目
 
 当前项目的核心入口是：
@@ -6,9 +11,53 @@
 doc/tutorial/fedmkt/test.py
 ```
 
-`test.py` 会通过 FATE 的 `multiprocess_launcher.launch(run)` 启动多方进程：中心侧 LLM 作为 arbiter，多个 SLM 作为 guest/host。训练过程中，各 SLM 先在私有数据上训练，再在公共数据上生成 logits；中心 LLM 收集 SLM logits，完成 token 对齐、蒸馏训练，并将新的 LLM logits 广播回各 SLM，循环执行多轮全局训练。
+`test.py` 会通过 FATE库 的 `multiprocess_launcher.launch(run)` 启动多方进程：中心侧 LLM 作为 arbiter，多个 SLM 作为 guest/host。训练过程中，各 SLM 先在私有数据上训练，再在公共数据上生成 logits；中心 LLM 收集 SLM logits，完成 token 对齐、蒸馏训练，并将新的 LLM logits 广播回各 SLM，循环执行多轮全局训练。
 
-## 项目结构
+## 一、研究任务与测试指标
+
+本项目面向“多源跨域知识可信共享的体系架构”研究任务，当前 `test.py` 主要覆盖两个研究点：知识蒸馏驱动的联邦大小模型协同训练架构，以及拉格朗日冗余编码赋能的可信知识共享方法。
+
+### 1. 知识蒸馏驱动的联邦大小模型协同训练架构
+
+功能实现：
+
+- 云侧大模型将通用知识传给端侧小模型。
+- 端侧小模型将私域知识传给云侧大模型。
+- 在数据及模型不出域的前提下，通过公共数据 logits、token alignment 和知识蒸馏实现大小模型双向知识迁移。
+
+测试指标：
+
+- 支持至少三种主流通用大模型作为中心侧 LLM：
+  - `Llama-2-13b-hf`
+  - `gemma-12b`
+  - `Qwen2.5-14B`
+- 支持四种私域 SLM：
+  - `opt-1.3b`
+  - `gpt2-xl`
+  - `Sheared-LLaMA-1.3B`
+  - `bloom-1b1`
+- 支持多种问答/推理数据集：
+  - `arc_challenge`
+  - `boolq`
+  - `arc_easy`
+  - `cqa`
+  - `rte`
+
+### 2. 拉格朗日冗余编码赋能的可信知识共享方法
+
+功能实现：
+
+- 端侧将本地待传知识信息通过拉格朗日冗余编码划分成 encoded shares 后共享。
+- 每个客户端获取来自其他客户端的 partial shares，并进行本地聚合后上传至服务器。
+- 服务器通过插值算法重构完整知识信息，保证端云交互过程中的知识共享可控、可验证。
+- 当前 FedMKT 主流程中的实现位于 `python/fate_llm/algo/fedmkt/mmlcc.py`，通过 `configs/default.yaml` 的 `mmlcc.use_aggregation` 控制是否启用。
+
+测试指标：
+
+- 关注编解码过程的相对误差。 https://swanlab.cn/@19854216519-/fedmkt/overview
+- 当 `swanlab` 中的 `mmlcc_relative_error` 小于 `1e-10` 时，可认为编码聚合和原始直接聚合在数值上等价，误差可忽略。
+
+## 二、项目结构
 
 详细目录说明见 [PROJECT_DIRECTORY.md](PROJECT_DIRECTORY.md)。
 
@@ -42,7 +91,7 @@ doc/tutorial/fedmkt/test.py
 └── lcc_fl/
 ```
 
-## 核心运行入口
+## 三、核心运行入口
 
 ### `doc/tutorial/fedmkt/test.py`
 
@@ -54,7 +103,7 @@ doc/tutorial/fedmkt/test.py
   - guest：训练第 0 个 SLM。
   - host `9999`：训练第 1 个 SLM。
   - host `10000`：训练第 2 个 SLM。
-  - host `10001`：训练第 3 个 SLM。
+  - host `10001`：训练第 3 个 SLM。 (guest和host只是name差异，本质上都是客户端)
 - 加载公共数据 `common` 和客户端私有数据 `client_i`。
 - 加载 LLM/SLM 词表映射文件，执行 logits 的 token alignment。
 - 使用 LoRA 方式加载和训练 LLM/SLM。
@@ -62,7 +111,7 @@ doc/tutorial/fedmkt/test.py
 - 训练结束后对当前任务做准确率评估。
 - 保存 LLM 和各 SLM 的可训练权重。
 
-## 操作流程
+## 四、操作流程
 
 以下操作都以项目根目录为基准。
 
@@ -76,10 +125,10 @@ doc/tutorial/fedmkt/configs/default.yaml
 
 常用修改项：
 
-- `data.active_task`：选择任务，支持 `arc_c`、`arc_e`、`rte`、`boolq`、`cqa`。
+- `data.active_task`：选择任务，支持 `arc_c`、`arc_e`、`rte`、`boolq`、`cqa`。   对应于六个数据集
 - `data.tasks.<task>.dataset_name`：任务对应的数据集名称。
 - `data.tasks.<task>.data_dir`：预处理后数据保存目录，也是 `test.py` 读取的数据目录。
-- `paths.llm_pretrained`：中心 LLM 模型路径。
+- `paths.llm_pretrained`：中心 LLM 模型路径。    在这里更换model，中心服务器三种异构的10B以上的model，每更换一个新的model，就要把对应的词表更换，详见default.yaml中的llm_to_slm_vocab_mappings和slm_to_llm_vocab_mappings
 - `paths.slm_pretrained`：4 个 SLM 模型路径。
 - `paths.vocab_mapping_dir`：词表映射文件目录。
 - `training.global_epochs`：全局训练轮数。
@@ -89,7 +138,7 @@ doc/tutorial/fedmkt/configs/default.yaml
 - `training.distill_strategy`：teacher 分布选择策略，当前支持 `greater`、`weighted_mean`。
 - `runtime.*_cuda_visible_devices`：不同 FATE 角色绑定的 GPU。
 - `mmlcc.use_aggregation`：是否启用 MMLCC 风格的 SLM teacher 聚合。
-- `wandb.mode` / `swanlab.mode`：日志记录模式。
+- `wandb.mode` / `swanlab.mode`：日志记录模式。 默认swanlab
 
 ### 2. 准备 FedMKT 数据切分
 
@@ -219,7 +268,7 @@ SWANLAB_WORKSPACE
 SWANLAB_LOGDIR
 ```
 
-## 训练产物
+## 五、训练产物
 
 默认保存路径由 `configs/default.yaml` 控制：
 
@@ -241,7 +290,7 @@ doc/tutorial/fedmkt/models/fedmkt_4_slms_slm_3
 
 因为 `test.py` 中 `save_trainable_weights_only=True`，保存内容主要是 LoRA/可训练权重，而不是完整基础模型。
 
-## 关键代码链路
+## 六、关键代码链路
 
 ```text
 doc/tutorial/fedmkt/test.py
@@ -270,7 +319,7 @@ python/fate_llm/algo/fedmkt/utils/
 python/fate_llm/algo/fedmkt/mmlcc.py
 ```
 
-## 注意事项
+## 七、注意事项
 
 - `test.py` 依赖从 `doc/tutorial/fedmkt` 目录运行时的相对路径，建议进入该目录后执行。
 - `configs/default.yaml` 中模型路径和数据路径带有本地绝对路径，需要按实际机器调整。

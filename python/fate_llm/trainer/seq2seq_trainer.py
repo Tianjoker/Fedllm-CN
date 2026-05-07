@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 from fate.ml.nn.trainer.trainer_base import HomoTrainerMixin, FedArguments, get_ith_checkpoint
 import os
+import inspect
 import torch
 import copy
 from torch import nn
@@ -37,6 +38,27 @@ from transformers.modeling_utils import unwrap_model
 
 
 TRAINABLE_WEIGHTS_NAME = "adapter_model.bin"
+
+
+def _tokenizer_init_kwargs(trainer_cls, tokenizer):
+    if tokenizer is None:
+        return {}
+
+    init_params = inspect.signature(trainer_cls.__init__).parameters
+    if "processing_class" in init_params:
+        return {"processing_class": tokenizer}
+    return {"tokenizer": tokenizer}
+
+
+def _get_eval_strategy(training_args):
+    return getattr(training_args, "eval_strategy", getattr(training_args, "evaluation_strategy", "no"))
+
+
+def _set_eval_strategy(training_args, value):
+    if hasattr(training_args, "eval_strategy"):
+        training_args.eval_strategy = value
+    if hasattr(training_args, "evaluation_strategy"):
+        training_args.evaluation_strategy = value
 
 
 @dataclass
@@ -68,6 +90,11 @@ class _S2STrainingArguments(_hf_Seq2SeqTrainingArguments):
         self.push_to_hub_token = None
 
         super().__post_init__()
+        if hasattr(self, "eval_strategy") and hasattr(self, "evaluation_strategy"):
+            if self.evaluation_strategy != "no":
+                self.eval_strategy = self.evaluation_strategy
+            else:
+                self.evaluation_strategy = self.eval_strategy
 
 DEFAULT_ARGS = _S2STrainingArguments().to_dict()
 
@@ -107,8 +134,8 @@ class HomoSeq2SeqTrainerClient(Seq2SeqTrainer, HomoTrainerMixin):
         preprocess_logits_for_metrics: Optional[Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = None,
     ):
         # in case you forget to set evaluation_strategy
-        if val_set is not None and training_args.evaluation_strategy == "no":
-            training_args.evaluation_strategy = "epoch"
+        if val_set is not None and _get_eval_strategy(training_args) == "no":
+            _set_eval_strategy(training_args, "epoch")
 
         HomoTrainerMixin.__init__(
             self,
@@ -141,9 +168,9 @@ class HomoSeq2SeqTrainerClient(Seq2SeqTrainer, HomoTrainerMixin):
             eval_dataset=val_set,
             data_collator=data_collator,
             optimizers=(optimizer, scheduler),
-            tokenizer=tokenizer,
             compute_metrics=self._compute_metrics_warp_func,
             preprocess_logits_for_metrics=preprocess_logits_for_metrics,
+            **_tokenizer_init_kwargs(Trainer, tokenizer),
         )
 
         self._add_fate_callback(self.callback_handler)

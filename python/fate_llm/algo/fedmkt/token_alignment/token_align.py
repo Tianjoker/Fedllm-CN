@@ -370,7 +370,7 @@ def token_align(
         batch_size=batch_size,
         with_indices=True,
         num_proc=preprocessing_num_workers,
-        load_from_cache_file=True,
+        load_from_cache_file=False,
         fn_kwargs={"blending_examples": blending_model_logits_dataset,
                    "blending_to_base_mapping": blending_to_base_mapping,
                    "base_tokenizer": base_tokenizer,

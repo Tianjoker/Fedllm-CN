@@ -120,6 +120,60 @@ class PELLM(torch.nn.Module):
             summary = self._pe_lm.print_trainable_parameters()
             logger.debug(f'PELLM model summary: \n{summary}')
 
+    def _iter_wrapped_models(self):
+        seen = set()
+        candidates = [self._pe_lm]
+        while candidates:
+            candidate = candidates.pop()
+            if candidate is None or id(candidate) in seen:
+                continue
+            seen.add(id(candidate))
+            yield candidate
+
+            for attr_name in ("module", "base_model", "model"):
+                child = getattr(candidate, attr_name, None)
+                if child is not None and child is not candidate:
+                    candidates.append(child)
+
+    @property
+    def hf_device_map(self):
+        for model in self._iter_wrapped_models():
+            device_map = getattr(model, "hf_device_map", None)
+            if device_map is not None:
+                return device_map
+        raise AttributeError("hf_device_map")
+
+    def _has_meta_parameters(self):
+        return any(param.is_meta for param in self.parameters())
+
+    def _has_hf_device_map(self):
+        try:
+            self.hf_device_map
+        except AttributeError:
+            return False
+        return True
+
+    def _is_dispatched_or_lazy_loaded(self):
+        return self._has_hf_device_map() or self._has_meta_parameters()
+
+    def to(self, *args, **kwargs):
+        if self._is_dispatched_or_lazy_loaded():
+            logger.info("skip PELLM.to(); model is managed by hf device_map/lazy loading")
+            return self
+        return super().to(*args, **kwargs)
+
+    def cuda(self, device=None):
+        if self._is_dispatched_or_lazy_loaded():
+            logger.info("skip PELLM.cuda(); model is managed by hf device_map/lazy loading")
+            return self
+        return super().cuda(device)
+
+    def cpu(self):
+        if self._is_dispatched_or_lazy_loaded():
+            logger.info("skip PELLM.cpu(); model is managed by hf device_map/lazy loading")
+            return self
+        return super().cpu()
+
     def forward(self, *args, **kwargs):
         forward_ret = self._pe_lm.forward(*args, **kwargs)
 

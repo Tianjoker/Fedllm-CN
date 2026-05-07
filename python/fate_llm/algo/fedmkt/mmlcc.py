@@ -110,8 +110,28 @@ def _gen_lagrange_coeffs(alpha_s, beta_s):
     return coeffs
 
 
+def _split_additive_blocks(values, num_blocks, rng):
+    """
+    Split each input vector into same-shaped additive blocks.
+
+    For every client vector x, this returns K vectors x_1, ..., x_K with
+    sum_k x_k = x. This follows the PPVFD-style split idea while keeping the
+    FedMKT teacher vector shape unchanged for every block.
+    """
+    values = np.asarray(values, dtype=np.float64)
+    num_blocks = max(int(num_blocks), 1)
+    if num_blocks == 1:
+        return values[:, None, :].astype(np.complex128)
+
+    split_weights = rng.random((values.shape[0], num_blocks, values.shape[1]))
+    split_weights_sum = split_weights.sum(axis=1, keepdims=True)
+    split_weights = split_weights / np.maximum(split_weights_sum, 1e-12)
+    return (values[:, None, :] * split_weights).astype(np.complex128)
+
+
 def _mmlcc_decode_sum(
     client_values,
+    num_blocks,
     privacy_guarantee,
     beta_radius,
     noise_sigma,
@@ -121,23 +141,24 @@ def _mmlcc_decode_sum(
     """
     Run analog MMLCC for one shared-support vector.
 
-    K is fixed to 1 here: each (sample, token-position) probability vector is
-    treated as one data block. The server decodes the sum of that block.
+    Each client vector is split into K same-shaped additive blocks. The server
+    decodes the K summed data blocks and adds them back to reconstruct the
+    summed teacher vector.
     """
     client_values = np.asarray(client_values, dtype=np.float64)
     num_clients, value_dim = client_values.shape
     if num_clients < 1:
         return np.zeros(value_dim, dtype=np.float64)
 
-    max_t = max(num_clients - 1, 0)
-    privacy_guarantee = min(max(int(privacy_guarantee), 0), max_t)
-    num_blocks = 1
+    num_blocks = max(int(num_blocks), 1)
+    privacy_guarantee = max(int(privacy_guarantee), 0)
     num_encoded_blocks = num_blocks + privacy_guarantee
+    num_coded_fragments = max(num_clients, num_encoded_blocks)
 
-    alphas = np.exp(2j * np.pi * np.arange(num_clients) / num_clients)
+    alphas = np.exp(2j * np.pi * np.arange(num_coded_fragments) / num_coded_fragments)
     betas = beta_radius * np.exp(2j * np.pi * np.arange(num_encoded_blocks) / num_encoded_blocks)
 
-    data_blocks = client_values[:, None, :].astype(np.complex128)
+    data_blocks = _split_additive_blocks(client_values, num_blocks, rng)
     if privacy_guarantee:
         std = math.sqrt(float(noise_sigma) ** 2 / privacy_guarantee / 2)
         privacy_blocks = rng.normal(
@@ -159,7 +180,7 @@ def _mmlcc_decode_sum(
     receiver_uploads = encoded_shares.sum(axis=0)
     decoding_matrix = _gen_lagrange_coeffs(betas, alphas)
     decoded_blocks = np.einsum("kn,nd->kd", decoding_matrix, receiver_uploads)
-    return decoded_blocks[0].real
+    return decoded_blocks[:num_blocks].real.sum(axis=0)
 
 
 def aggregate_aligned_slm_teachers_dataset(
@@ -167,6 +188,7 @@ def aggregate_aligned_slm_teachers_dataset(
     blending_num,
     distill_temperature,
     probability_epsilon=1e-12,
+    num_blocks=1,
     privacy_guarantee=1,
     beta_radius=1.15,
     noise_sigma=1.0,
@@ -180,8 +202,14 @@ def aggregate_aligned_slm_teachers_dataset(
     all SLM logits are already mapped to the LLM vocabulary, so every union
     support contains token ids with the same semantics.
     """
+    num_blocks = max(int(num_blocks), 1)
     if blending_num <= 1:
-        return aligned_dataset, {"relative_error": 0.0, "positions": 0}
+        return aligned_dataset, {
+            "relative_error": 0.0,
+            "positions": 0,
+            "privacy_guarantee": int(max(int(privacy_guarantee), 0)),
+            "num_blocks": int(num_blocks),
+        }
 
     required_columns = []
     for idx in range(blending_num):
@@ -245,6 +273,7 @@ def aggregate_aligned_slm_teachers_dataset(
 
                     decoded_sum = _mmlcc_decode_sum(
                         per_client_values,
+                        num_blocks,
                         privacy_guarantee,
                         beta_radius,
                         noise_sigma,
@@ -310,8 +339,8 @@ def aggregate_aligned_slm_teachers_dataset(
     metrics = {
         "relative_error": float(relative_error),
         "positions": int(error_stats["positions"]),
-        "privacy_guarantee": int(min(max(int(privacy_guarantee), 0), max(blending_num - 1, 0))),
-        "num_blocks": 1,
+        "privacy_guarantee": int(max(int(privacy_guarantee), 0)),
+        "num_blocks": int(num_blocks),
     }
 
     logger.info(

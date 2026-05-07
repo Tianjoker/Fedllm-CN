@@ -15,7 +15,12 @@
 import torch
 from fate.ml.nn.homo.fedavg import FedAVGServer, FedAVGArguments, FedArguments
 from fate.arch import Context
-from fate_llm.trainer.seq2seq_trainer import HomoSeq2SeqTrainerClient, Seq2SeqTrainingArguments
+from fate_llm.trainer.seq2seq_trainer import (
+    HomoSeq2SeqTrainerClient,
+    Seq2SeqTrainingArguments,
+    _get_eval_strategy,
+    _set_eval_strategy,
+)
 from fate.ml.aggregator import AggregatorClientWrapper
 import logging
 from typing import List, Optional, Tuple, Callable, Dict
@@ -57,8 +62,8 @@ class Seq2SeqFedAVGClient(HomoSeq2SeqTrainerClient):
         preprocess_logits_for_metrics: Optional[Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = None,
     ):
         # in case you forget to set evaluation_strategy
-        if val_set is not None and training_args.evaluation_strategy == "no":
-            training_args.evaluation_strategy = "epoch"
+        if val_set is not None and _get_eval_strategy(training_args) == "no":
+            _set_eval_strategy(training_args, "epoch")
 
         HomoSeq2SeqTrainerClient.__init__(
             self,
@@ -103,4 +108,3 @@ class Seq2SeqFedAVGClient(HomoSeq2SeqTrainerClient):
         **kwargs,
     ):
         aggregator.model_aggregation(ctx, model)
-

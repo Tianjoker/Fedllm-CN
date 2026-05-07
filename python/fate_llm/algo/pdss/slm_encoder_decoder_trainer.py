@@ -1,4 +1,4 @@
-from fate_llm.trainer.seq2seq_trainer import Seq2SeqTrainer
+from fate_llm.trainer.seq2seq_trainer import Seq2SeqTrainer, _tokenizer_init_kwargs
 from transformers import DataCollatorForSeq2Seq
 from transformers import AutoTokenizer
 import pandas as pd
@@ -19,10 +19,12 @@ class EDPrefixDataCollator(DataCollatorForSeq2Seq):
 class EncoderDecoderPrefixTrainer(Seq2SeqTrainer):
 
     def __init__(self, alpha=0.5, *args, **kwargs):
+        tokenizer = kwargs.pop("tokenizer", None)
+        kwargs.update(_tokenizer_init_kwargs(Seq2SeqTrainer, tokenizer))
         super().__init__(*args, **kwargs)
         self.alpha = alpha
 
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         out_a = model(**inputs['encoder'])
         out_b = model(**inputs['decoder'])
         loss = self.alpha * out_a.loss + (1. - self.alpha) * out_b.loss

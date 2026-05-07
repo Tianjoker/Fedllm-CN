@@ -19,19 +19,22 @@ import transformers
 SENTENCEPIECE_SPACE = "\u2581"
 BYTE_BPE_SPACE = "\u0120"
 
-TOKENIZER_TO_SPECIAL_TOKEN = {
-    transformers.LlamaTokenizer: SENTENCEPIECE_SPACE,
-    transformers.LlamaTokenizerFast: SENTENCEPIECE_SPACE,
-    transformers.GPTNeoXTokenizerFast: BYTE_BPE_SPACE,
-    transformers.GPT2TokenizerFast: BYTE_BPE_SPACE,
-    transformers.GPT2Tokenizer: BYTE_BPE_SPACE,
-    transformers.BloomTokenizerFast: BYTE_BPE_SPACE,
-}
+TOKENIZER_TO_SPECIAL_TOKEN = {}
 
-if hasattr(transformers, "GemmaTokenizer"):
-    TOKENIZER_TO_SPECIAL_TOKEN[transformers.GemmaTokenizer] = SENTENCEPIECE_SPACE
-if hasattr(transformers, "GemmaTokenizerFast"):
-    TOKENIZER_TO_SPECIAL_TOKEN[transformers.GemmaTokenizerFast] = SENTENCEPIECE_SPACE
+
+def _register_tokenizer(tokenizer_name, marker):
+    try:
+        tokenizer_cls = getattr(transformers, tokenizer_name)
+    except (AttributeError, ImportError):
+        return
+    TOKENIZER_TO_SPECIAL_TOKEN[tokenizer_cls] = marker
+
+
+for _tokenizer_name in ("LlamaTokenizer", "LlamaTokenizerFast", "GemmaTokenizer", "GemmaTokenizerFast"):
+    _register_tokenizer(_tokenizer_name, SENTENCEPIECE_SPACE)
+
+for _tokenizer_name in ("GPTNeoXTokenizerFast", "GPT2TokenizerFast", "GPT2Tokenizer", "BloomTokenizerFast"):
+    _register_tokenizer(_tokenizer_name, BYTE_BPE_SPACE)
 
 
 def get_special_token_marker(tokenizer):

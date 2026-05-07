@@ -6,9 +6,11 @@ import math
 import ast
 import sys
 import warnings
+import torch
 
 from fate.arch import Context
 from fate.arch.launchers.multiprocess_launcher import launch
+from vocab_mapping_selector import select_vocab_mapping_names
 
 try:
     import wandb
@@ -285,25 +287,35 @@ public_start_idx = _cfg_env(experiment_config, "FEDMKT_PUBLIC_START_IDX", "data.
 llm_pretrained_path = _cfg(experiment_config, "paths.llm_pretrained", llm_pretrained_path)
 slm_pretrained_paths = _cfg(experiment_config, "paths.slm_pretrained", slm_pretrained_paths)
 vocab_mapping_directory = _cfg(experiment_config, "paths.vocab_mapping_dir", vocab_mapping_directory)
+slm_to_llm_mapping_names, llm_to_slm_mapping_names = select_vocab_mapping_names(llm_pretrained_path)
 slm_to_llm_vocab_mapping_paths = _join_mapping_paths(
     vocab_mapping_directory,
-    _cfg(
-        experiment_config,
-        "paths.slm_to_llm_vocab_mappings",
-        ["opt_to_llama.json", "gpt2_to_llama.json", "llama_small_to_llama.json", "bloom_to_llama.json"],
-    ),
+    slm_to_llm_mapping_names,
 )
 llm_to_slm_vocab_mapping_paths = _join_mapping_paths(
     vocab_mapping_directory,
-    _cfg(
-        experiment_config,
-        "paths.llm_to_slm_vocab_mappings",
-        ["llama_to_opt.json", "llama_to_gpt2.json", "llama_to_llama_small", "llama_to_bloom.json"],
-    ),
+    llm_to_slm_mapping_names,
 )
 training_output_dir = _cfg(experiment_config, "paths.training_output_dir", "../../../../.")
 llm_model_saved_directory = _cfg(experiment_config, "paths.llm_model_save_dir", llm_model_saved_directory)
 slm_models_saved_directory = _cfg(experiment_config, "paths.slm_model_save_dirs", slm_models_saved_directory)
+
+
+def _validate_model_path(model_path, label):
+    if not isinstance(model_path, str) or not os.path.isabs(model_path):
+        return
+    if not os.path.isdir(model_path):
+        raise FileNotFoundError(
+            f"{label} local model path does not exist: {model_path}. "
+            "If this is a Hugging Face repo, use the form 'namespace/repo_name' instead of an absolute path."
+        )
+    if not os.path.exists(os.path.join(model_path, "config.json")):
+        raise FileNotFoundError(f"{label} model path is missing config.json: {model_path}")
+
+
+_validate_model_path(llm_pretrained_path, "LLM")
+for _slm_idx, _slm_path in enumerate(slm_pretrained_paths):
+    _validate_model_path(_slm_path, f"SLM[{_slm_idx}]")
 
 slm_lora_target_modules = _cfg(experiment_config, "lora.slm_target_modules", slm_lora_target_modules)
 llm_lora_target_modules = _cfg(experiment_config, "lora.llm_target_modules", ["q_proj", "k_proj", "v_proj", "o_proj"])
@@ -333,11 +345,14 @@ llm_torch_dtype = _cfg(experiment_config, "training.llm_torch_dtype", "float32")
 slm_torch_dtype = _cfg(experiment_config, "training.slm_torch_dtype", "float32")
 llm_device_map = _cfg(experiment_config, "training.llm_device_map", None)
 llm_low_cpu_mem_usage = bool(_cfg(experiment_config, "training.llm_low_cpu_mem_usage", False))
+llm_max_memory = _cfg(experiment_config, "training.llm_max_memory", None)
 llm_model_load_kwargs = {}
 if llm_device_map not in {None, "", "none", "None"}:
     llm_model_load_kwargs["device_map"] = llm_device_map
 if llm_low_cpu_mem_usage:
     llm_model_load_kwargs["low_cpu_mem_usage"] = True
+if llm_max_memory:
+    llm_model_load_kwargs["max_memory"] = {int(k): str(v) for k, v in llm_max_memory.items()}
 
 arbiter_cuda_visible_devices = str(_cfg(experiment_config, "runtime.arbiter_cuda_visible_devices", "2"))
 guest_cuda_visible_devices = str(_cfg(experiment_config, "runtime.guest_cuda_visible_devices", "4"))
@@ -379,6 +394,21 @@ os.environ["SWANLAB_MODE"] = swanlab_mode
 
 def _wandb_active():
     return wandb_enabled and wandb is not None and wandb.run is not None
+
+
+def print_cuda_memory(prefix):
+    if not torch.cuda.is_available():
+        return
+    for idx in range(torch.cuda.device_count()):
+        allocated = torch.cuda.memory_allocated(idx) / 1024 ** 3
+        reserved = torch.cuda.memory_reserved(idx) / 1024 ** 3
+        free, total = torch.cuda.mem_get_info(idx)
+        print(
+            f"[cuda][{prefix}] cuda:{idx} "
+            f"allocated={allocated:.2f}GiB reserved={reserved:.2f}GiB "
+            f"free={free / 1024 ** 3:.2f}GiB total={total / 1024 ** 3:.2f}GiB",
+            flush=True,
+        )
 
 
 def _swanlab_active():
@@ -449,9 +479,17 @@ def ensure_wandb_run(ctx, name: str):
         os.environ["WANDB_DISABLED"] = "true"
         print(f"[wandb] disabled after init failure: {exc}", flush=True)
         return
-    _tracking_define_metric("round")
-    _tracking_define_metric("client/*", step_metric="round")
-    _tracking_define_metric("server/*", step_metric="round")
+    for prefix in ("client", "server"):
+        _tracking_define_metric(f"{prefix}/fedmkt_round")
+        _tracking_define_metric(f"{prefix}/fedmkt_loss_step")
+        _tracking_define_metric(f"{prefix}/total_loss", step_metric=f"{prefix}/fedmkt_loss_step")
+        _tracking_define_metric(f"{prefix}/supervised_lm_loss", step_metric=f"{prefix}/fedmkt_loss_step")
+        _tracking_define_metric(f"{prefix}/distill_loss", step_metric=f"{prefix}/fedmkt_loss_step")
+        _tracking_define_metric(f"{prefix}/weighted_supervised_lm_loss", step_metric=f"{prefix}/fedmkt_loss_step")
+        _tracking_define_metric(f"{prefix}/weighted_distill_loss", step_metric=f"{prefix}/fedmkt_loss_step")
+        _tracking_define_metric(f"{prefix}/arc_mc_accuracy", step_metric=f"{prefix}/fedmkt_round")
+        _tracking_define_metric(f"{prefix}/arc_mc_avg_choice_loss", step_metric=f"{prefix}/fedmkt_round")
+        _tracking_define_metric(f"{prefix}/arc_mc_num_examples", step_metric=f"{prefix}/fedmkt_round")
 
 
 def evaluate_arc_mc_accuracy(model, tokenizer, split="validation", max_examples=None, arc_config="ARC-Challenge"):
@@ -869,6 +907,8 @@ def train_llm(ctx):
         torch_dtype=llm_torch_dtype,
         model_load_kwargs=llm_model_load_kwargs,
     )
+    print(f"[LLM device_map] {getattr(model, 'hf_device_map', None)}", flush=True)
+    print_cuda_memory("after_llm_load")
 
     pub_data = QaDataset(
         tokenizer_name_or_path=llm_pretrained_path,
@@ -938,7 +978,9 @@ def train_llm(ctx):
         save_trainable_weights_only=True,
     )
 
+    print_cuda_memory("before_llm_train")
     trainer.train()
+    print_cuda_memory("after_llm_train")
 
     task_metrics = evaluate_task_accuracy(
         model,

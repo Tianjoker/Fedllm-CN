@@ -37,7 +37,7 @@ def sync_dataset(dataset, local_rank, world_size, device):
             if key in integer_keys_2d or key in integer_keys_3d:
                 dtype = torch.int32
             else:
-                dtype = torch.float64
+                dtype = torch.float32
 
             values = dataset[key]
             v_tensor = torch.tensor(values, dtype=dtype).cuda(device)
@@ -56,7 +56,7 @@ def sync_dataset(dataset, local_rank, world_size, device):
             if key in integer_keys_2d or key in integer_keys_3d:
                 dtype = torch.int32
             else:
-                dtype = torch.float64
+                dtype = torch.float32
 
             if key in integer_keys_2d:
                 shape_tensor = torch.tensor([0, 0], dtype=torch.int32).cuda(device)

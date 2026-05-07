@@ -31,7 +31,7 @@ from transformers import PreTrainedTokenizer, PreTrainedModel
 from typing import Dict, Any
 from transformers import Seq2SeqTrainingArguments 
 from transformers.trainer_utils import EvalPrediction
-from fate_llm.trainer.seq2seq_trainer import Seq2SeqTrainer, Seq2SeqTrainingArguments
+from fate_llm.trainer.seq2seq_trainer import Seq2SeqTrainer, Seq2SeqTrainingArguments, _tokenizer_init_kwargs
 from fate_llm.inference.inference_base import Inference
 from fate_llm.algo.inferdpt.inferdpt import InferDPTClient, InferDPTServer
 from fate_llm.algo.pdss.encoder_decoder.slm_encoder_decoder import SLMEncoderDecoderClient, SLMEncoderDecoderServer
@@ -94,13 +94,13 @@ class DSSTrainerClient(Seq2SeqTrainer):
             eval_dataset=val_set,
             data_collator=data_collator,
             optimizers=(optimizer, scheduler),
-            tokenizer=tokenizer,
             preprocess_logits_for_metrics=preprocess_logits_for_metrics,
             compute_metrics=compute_metrics,
             callbacks=callbacks,
+            **_tokenizer_init_kwargs(Seq2SeqTrainer, tokenizer),
         )
 
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
 
         label_outputs = model(**inputs['predict'])
         cot_outputs = model(**inputs['rationale'])

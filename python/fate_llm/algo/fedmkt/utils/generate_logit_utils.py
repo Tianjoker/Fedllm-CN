@@ -51,8 +51,7 @@ class LogitsSelection(object):
 
     @classmethod
     def select_highest(cls, logits, top_k_logits_keep):
-        top_k_logits, top_k_indices = torch.topk(logits.cuda(), k=top_k_logits_keep)
-        logits.cpu()
+        top_k_logits, top_k_indices = torch.topk(logits, k=top_k_logits_keep)
 
         return top_k_logits, top_k_indices
 
@@ -95,14 +94,9 @@ def generate_pub_data_logits(inputs, model, training_args, data_collator):
 
         metric = Metric.cal_metric(logits, input_ids, attention_mask, labels, training_args)
 
-        input_ids.cpu()
         del input_ids
-        attention_mask.cpu()
         del attention_mask
-        labels.cpu()
         del labels
-        logits.cpu()
-        metric.cpu()
         #输出 logits，shape：[batch_size, seq_len, vocab_size]
 
         #出于显存和存储考虑，不能把 全 vocab 的 logits 保存下来（可能是几十万个 token 的分布）。
@@ -112,8 +106,9 @@ def generate_pub_data_logits(inputs, model, training_args, data_collator):
             raise ValueError("Please specify top_k_logits_keep, fulling save will leak to memory exceeds")
 
         selected_logits, selected_indices = LogitsSelection.select_logits(logits=logits, training_args=training_args)
-        selected_logits.cpu()
-        selected_indices.cpu()
+        selected_logits = selected_logits.detach().float().cpu()
+        selected_indices = selected_indices.detach().cpu()
+        metric = metric.detach().float().cpu()
         #在 inputs 里新增三个字段：
         #PER_STEP_LOGITS：top-k logits
         #PER_STEP_INDICES：对应的 token 索引
