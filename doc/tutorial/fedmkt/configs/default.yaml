@@ -109,7 +109,7 @@ training:
 runtime:
   # The arbiter is the center LLM process. Use comma-separated ids to expose
   # multiple GPUs to that one process, for example "2,3,4".
-  arbiter_cuda_visible_devices: "1,2,3"  #中心服务器默认可见
+  arbiter_cuda_visible_devices: "1,2,3"  # 中心服务器默认可见
   guest_cuda_visible_devices: "4"
   host_cuda_visible_devices:
     "9999": "5"
@@ -144,3 +144,11 @@ swanlab:
   group: fedmkt
   workspace:
   logdir: swanlog
+
+local_tracking:
+  # Keep a deployment-safe local copy of every metric sent to SwanLab/WandB.
+  # One JSONL/CSV pair is written per FATE process to avoid multi-process file contention.
+  enabled: true
+  log_dir: "./local_metrics"
+  write_jsonl: true
+  write_csv: true

@@ -6,21 +6,12 @@ import math
 import ast
 import sys
 import warnings
-import torch
 
-from fate.arch import Context
 from fate.arch.launchers.multiprocess_launcher import launch
 from vocab_mapping_selector import select_vocab_mapping_names
 
-try:
-    import wandb
-except ImportError:
-    wandb = None
-
-try:
-    import swanlab
-except ImportError:
-    swanlab = None
+wandb = None
+swanlab = None
 
 
 warnings.filterwarnings(
@@ -41,6 +32,47 @@ warnings.filterwarnings(
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
 PROJECT_PYTHON_DIR = os.path.join(PROJECT_ROOT, "python")
+if PROJECT_PYTHON_DIR not in sys.path:
+    sys.path.insert(0, PROJECT_PYTHON_DIR)
+
+from fate_llm.algo.fedmkt.utils.local_metric_logger import (
+    configure_local_tracking,
+    local_tracking_enabled,
+    log_local_metrics,
+    set_local_run_name,
+)
+
+torch = None
+
+
+def ensure_torch_imported():
+    global torch
+    if torch is None:
+        import torch as torch_module
+        torch = torch_module
+    return torch
+
+
+def ensure_wandb_imported():
+    global wandb
+    if wandb is None:
+        try:
+            import wandb as wandb_module
+            wandb = wandb_module
+        except ImportError:
+            wandb = False
+    return None if wandb is False else wandb
+
+
+def ensure_swanlab_imported():
+    global swanlab
+    if swanlab is None:
+        try:
+            import swanlab as swanlab_module
+            swanlab = swanlab_module
+        except ImportError:
+            swanlab = False
+    return None if swanlab is False else swanlab
 
 
 def _env_optional_int(name):
@@ -48,6 +80,17 @@ def _env_optional_int(name):
     if value is None or value.strip() == "":
         return None
     return int(value)
+
+
+def _parse_bool(value, default=False):
+    if value is None:
+        return default
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on", "enabled"}:
+        return True
+    if normalized in {"", "0", "false", "no", "n", "off", "disabled", "none"}:
+        return False
+    return default
 
 
 def _normalize_dataset_name(name):
@@ -375,7 +418,7 @@ wandb_mode = str(_cfg_env(experiment_config, "WANDB_MODE", "wandb.mode", "disabl
 wandb_project = str(_cfg_env(experiment_config, "WANDB_PROJECT", "wandb.project", "fedmkt"))
 wandb_group = str(_cfg_env(experiment_config, "WANDB_GROUP", "wandb.group", "fedmkt"))
 wandb_init_timeout = int(_cfg_env(experiment_config, "WANDB_INIT_TIMEOUT", "wandb.init_timeout", 30, int))
-wandb_enabled = wandb is not None and wandb_mode not in {"", "disabled", "disable", "false", "0", "none"}
+wandb_enabled = wandb_mode not in {"", "disabled", "disable", "false", "0", "none"}
 if not wandb_enabled:
     os.environ["WANDB_MODE"] = "disabled"
     os.environ["WANDB_DISABLED"] = "true"
@@ -388,15 +431,45 @@ swanlab_project = str(_cfg_env(experiment_config, "SWANLAB_PROJECT", "swanlab.pr
 swanlab_group = _cfg_env(experiment_config, "SWANLAB_GROUP", "swanlab.group", "fedmkt")
 swanlab_workspace = _cfg_env(experiment_config, "SWANLAB_WORKSPACE", "swanlab.workspace", None)
 swanlab_logdir = _cfg_env(experiment_config, "SWANLAB_LOGDIR", "swanlab.logdir", "swanlog")
-swanlab_enabled = swanlab is not None and swanlab_mode not in {"", "disabled", "disable", "false", "0", "none"}
+swanlab_enabled = swanlab_mode not in {"", "disabled", "disable", "false", "0", "none"}
 os.environ["SWANLAB_MODE"] = swanlab_mode
+
+local_tracking_enabled_cfg = _parse_bool(
+    os.environ.get("FEDMKT_LOCAL_TRACKING_ENABLED"),
+    _parse_bool(_cfg(experiment_config, "local_tracking.enabled", True), True),
+)
+local_tracking_log_dir = _cfg_env(
+    experiment_config,
+    "FEDMKT_LOCAL_LOG_DIR",
+    "local_tracking.log_dir",
+    os.path.join(PROJECT_ROOT, "local_metrics"),
+)
+if local_tracking_log_dir and not os.path.isabs(str(local_tracking_log_dir)):
+    local_tracking_log_dir = os.path.abspath(os.path.join(PROJECT_ROOT, str(local_tracking_log_dir)))
+local_tracking_write_jsonl = _parse_bool(
+    os.environ.get("FEDMKT_LOCAL_WRITE_JSONL"),
+    _parse_bool(_cfg(experiment_config, "local_tracking.write_jsonl", True), True),
+)
+local_tracking_write_csv = _parse_bool(
+    os.environ.get("FEDMKT_LOCAL_WRITE_CSV"),
+    _parse_bool(_cfg(experiment_config, "local_tracking.write_csv", True), True),
+)
+configure_local_tracking(
+    enabled=local_tracking_enabled_cfg,
+    log_dir=local_tracking_log_dir,
+    run_name="fedmkt",
+    write_jsonl=local_tracking_write_jsonl,
+    write_csv=local_tracking_write_csv,
+)
 
 
 def _wandb_active():
-    return wandb_enabled and wandb is not None and wandb.run is not None
+    wandb_module = ensure_wandb_imported() if wandb_enabled else None
+    return wandb_module is not None and getattr(wandb_module, "run", None) is not None
 
 
 def print_cuda_memory(prefix):
+    torch = ensure_torch_imported()
     if not torch.cuda.is_available():
         return
     for idx in range(torch.cuda.device_count()):
@@ -411,31 +484,144 @@ def print_cuda_memory(prefix):
         )
 
 
+def print_cuda_binding(ctx, prefix):
+    torch = ensure_torch_imported()
+    cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    initialized_before = torch.cuda.is_initialized()
+    if torch.cuda.is_available():
+        device_count = torch.cuda.device_count()
+        device_names = [torch.cuda.get_device_name(idx) for idx in range(device_count)]
+    else:
+        device_count = 0
+        device_names = []
+    print(
+        f"[cuda-binding][{prefix}] party={ctx.local.party} "
+        f"CUDA_VISIBLE_DEVICES={cuda_visible} "
+        f"cuda_initialized_before_check={initialized_before} "
+        f"torch_device_count={device_count} "
+        f"device_names={device_names}",
+        flush=True,
+    )
+    return initialized_before, device_count
+
+
+def print_model_device(prefix, model):
+    try:
+        first_param_device = next(model.parameters()).device
+    except StopIteration:
+        first_param_device = "no_parameters"
+    except Exception as exc:
+        first_param_device = f"unavailable:{exc}"
+    print(
+        f"[model-device][{prefix}] first_parameter_device={first_param_device} "
+        f"hf_device_map={getattr(model, 'hf_device_map', None)}",
+        flush=True,
+    )
+
+
+def _parse_cuda_visible_devices(value):
+    devices = []
+    for raw in str(value or "").split(","):
+        raw = raw.strip()
+        if raw == "":
+            continue
+        try:
+            devices.append(int(raw))
+        except ValueError:
+            pass
+    return devices
+
+
+def configure_process_cuda(ctx, prefix, visible_devices, force_single_device=False):
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(visible_devices)
+    initialized_before, device_count = print_cuda_binding(ctx, prefix)
+    selected_devices = _parse_cuda_visible_devices(visible_devices)
+    os.environ.pop("FEDMKT_FORCE_CUDA_DEVICE", None)
+
+    if initialized_before and force_single_device and selected_devices:
+        torch = ensure_torch_imported()
+        target_device = selected_devices[0]
+        if target_device < device_count:
+            torch.cuda.set_device(target_device)
+            os.environ["FEDMKT_FORCE_CUDA_DEVICE"] = str(target_device)
+            print(
+                f"[cuda-binding][{prefix}] CUDA was initialized before binding; "
+                f"forcing this process to physical cuda:{target_device}",
+                flush=True,
+            )
+        else:
+            print(
+                f"[cuda-binding][{prefix}] cannot force cuda:{target_device}; "
+                f"torch_device_count={device_count}",
+                flush=True,
+            )
+
+    if initialized_before and not force_single_device and selected_devices:
+        configure_llm_max_memory_for_preinitialized_cuda(selected_devices, device_count, prefix)
+
+
+def configure_llm_max_memory_for_preinitialized_cuda(selected_devices, device_count, prefix):
+    if llm_model_load_kwargs.get("device_map") in {None, "", "none", "None"}:
+        return
+    if llm_model_load_kwargs.get("max_memory"):
+        return
+    if not selected_devices:
+        return
+    max_memory = {}
+    selected_set = set(selected_devices)
+    for idx in range(device_count):
+        max_memory[idx] = "38GiB" if idx in selected_set else "0GiB"
+    llm_model_load_kwargs["max_memory"] = max_memory
+    print(
+        f"[cuda-binding][{prefix}] CUDA was initialized before binding; "
+        f"restricting LLM device_map with max_memory={max_memory}",
+        flush=True,
+    )
+
+
+def force_training_args_device(training_args):
+    forced_device = os.environ.get("FEDMKT_FORCE_CUDA_DEVICE")
+    if forced_device in {None, ""}:
+        return training_args
+    torch = ensure_torch_imported()
+    device = torch.device(f"cuda:{int(forced_device)}")
+    torch.cuda.set_device(device)
+    training_args.__dict__["_setup_devices"] = device
+    training_args._n_gpu = 1
+    print(
+        f"[training-args-device] forced training_args.device={device} "
+        f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}",
+        flush=True,
+    )
+    return training_args
+
+
 def _swanlab_active():
-    return swanlab_enabled and swanlab is not None
+    return ensure_swanlab_imported() is not None if swanlab_enabled else False
 
 
 def _tracking_active():
-    return _wandb_active() or _swanlab_active()
+    return _wandb_active() or _swanlab_active() or local_tracking_enabled()
 
 
 def _tracking_define_metric(*args, **kwargs):
     if _wandb_active():
         try:
-            wandb.define_metric(*args, **kwargs)
+            ensure_wandb_imported().define_metric(*args, **kwargs)
         except Exception:
             pass
 
 
 def _tracking_log(metrics):
+    log_local_metrics(metrics)
     if _wandb_active():
         try:
-            wandb.log(metrics)
+            ensure_wandb_imported().log(metrics)
         except Exception as exc:
             print(f"[wandb] log skipped after failure: {exc}", flush=True)
     if _swanlab_active():
         try:
-            swanlab.log(metrics)
+            ensure_swanlab_imported().log(metrics)
         except Exception as exc:
             print(f"[swanlab] log skipped after failure: {exc}", flush=True)
 
@@ -445,9 +631,11 @@ def ensure_wandb_run(ctx, name: str):
     多进程下不要依赖 report_to 自动 init，强制确保当前进程里 wandb.run 可用
     """
     global wandb_enabled, swanlab_enabled
-    if swanlab_enabled and swanlab is not None:
+    set_local_run_name(name)
+    swanlab_module = ensure_swanlab_imported() if swanlab_enabled else None
+    if swanlab_enabled and swanlab_module is not None:
         try:
-            swanlab.init(
+            swanlab_module.init(
                 project=swanlab_project,
                 workspace=swanlab_workspace,
                 experiment_name=name,
@@ -461,17 +649,18 @@ def ensure_wandb_run(ctx, name: str):
             swanlab_enabled = False
             print(f"[swanlab] disabled after init failure: {exc}", flush=True)
 
-    if not wandb_enabled or wandb is None or wandb.run is not None:
+    wandb_module = ensure_wandb_imported() if wandb_enabled else None
+    if not wandb_enabled or wandb_module is None or getattr(wandb_module, "run", None) is not None:
         return
 
     try:
-        wandb.init(
+        wandb_module.init(
             project=wandb_project,
             group=wandb_group,
             name=name,
             reinit="finish_previous",
             mode=wandb_mode,
-            settings=wandb.Settings(init_timeout=wandb_init_timeout),
+            settings=wandb_module.Settings(init_timeout=wandb_init_timeout),
         )
     except Exception as exc:
         wandb_enabled = False
@@ -877,6 +1066,7 @@ def train_llm(ctx):
     if PROJECT_PYTHON_DIR not in sys.path:
         sys.path.insert(0, PROJECT_PYTHON_DIR)
 
+    ensure_torch_imported()
     from peft import LoraConfig, TaskType
     from fate_llm.model_zoo.pellm.llama import LLaMa
     from fate_llm.model_zoo.pellm.auto_causal_lm import AutoCausalLM
@@ -908,6 +1098,7 @@ def train_llm(ctx):
         model_load_kwargs=llm_model_load_kwargs,
     )
     print(f"[LLM device_map] {getattr(model, 'hf_device_map', None)}", flush=True)
+    print_model_device("after_llm_load", model)
     print_cuda_memory("after_llm_load")
 
     pub_data = QaDataset(
@@ -1001,6 +1192,7 @@ def train_slm(ctx, slm_idx):
     if PROJECT_PYTHON_DIR not in sys.path:
         sys.path.insert(0, PROJECT_PYTHON_DIR)
 
+    ensure_torch_imported()
     import transformers
     from peft import LoraConfig, TaskType
     from fate_llm.model_zoo.pellm.llama import LLaMa
@@ -1031,6 +1223,8 @@ def train_slm(ctx, slm_idx):
         peft_config=lora_config.to_dict(),
         torch_dtype=slm_torch_dtype,
     )
+    print_model_device(f"after_slm{slm_idx}_load", model)
+    print_cuda_memory(f"after_slm{slm_idx}_load")
 
     priv_data = QaDataset(
         tokenizer_name_or_path=slm_pretrained_paths[slm_idx],
@@ -1081,6 +1275,7 @@ def train_slm(ctx, slm_idx):
         report_to=[],
         logging_strategy="no",
     )
+    force_training_args_device(training_args)
 
     tokenizer = get_tokenizer(slm_pretrained_paths[slm_idx])
 
@@ -1117,7 +1312,8 @@ def train_slm(ctx, slm_idx):
     trainer.save_model(slm_models_saved_directory[slm_idx])
 
 
-def run(ctx: Context):
+def run(ctx):
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     print(f"[path] PROJECT_PYTHON_DIR={PROJECT_PYTHON_DIR}", flush=True)
     print(
         f"[config] path={experiment_config_path} task={fedmkt_active_task} dataset={fedmkt_dataset_name} "
@@ -1128,24 +1324,25 @@ def run(ctx: Context):
         flush=True,
     )
     if ctx.is_on_arbiter:
-        os.environ["CUDA_VISIBLE_DEVICES"] = arbiter_cuda_visible_devices
+        configure_process_cuda(ctx, "arbiter_before_train_llm", arbiter_cuda_visible_devices)
         train_llm(ctx)
     elif ctx.is_on_guest:
-        os.environ["CUDA_VISIBLE_DEVICES"] = guest_cuda_visible_devices
+        configure_process_cuda(ctx, "guest_before_train_slm0", guest_cuda_visible_devices, force_single_device=True)
         train_slm(ctx, slm_idx=0)
     else:
         if ctx.local.party[1] == "9999":
-            os.environ["CUDA_VISIBLE_DEVICES"] = str(host_cuda_visible_devices.get("9999", "5"))
+            host_visible_devices = str(host_cuda_visible_devices.get("9999", "5"))
             slm_idx = 1
         elif ctx.local.party[1] == "10000":
-            os.environ["CUDA_VISIBLE_DEVICES"] = str(host_cuda_visible_devices.get("10000", "6"))
+            host_visible_devices = str(host_cuda_visible_devices.get("10000", "6"))
             slm_idx = 2
         elif ctx.local.party[1] == "10001":
-            os.environ["CUDA_VISIBLE_DEVICES"] = str(host_cuda_visible_devices.get("10001", "7"))
+            host_visible_devices = str(host_cuda_visible_devices.get("10001", "7"))
             slm_idx = 3
         else:
             raise ValueError(f"party_id={ctx.local.party[1]} is illegal")
 
+        configure_process_cuda(ctx, f"host_before_train_slm{slm_idx}", host_visible_devices, force_single_device=True)
         train_slm(ctx, slm_idx=slm_idx)
 
 

@@ -30,6 +30,7 @@ from fate_llm.algo.fedmkt.utils.vars_define import (
     ALIGNED_OTHER_METRIC,
     METRIC,
 )
+from fate_llm.algo.fedmkt.utils.local_metric_logger import log_local_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -217,6 +218,7 @@ class FedMKTTrainer(Seq2SeqTrainer):
                 swanlab.log(metrics)
         except Exception:
             pass
+        log_local_metrics(metrics)
 
         print(
             f"[FedMKT loss][{self.loss_log_prefix}] "

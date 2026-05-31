@@ -217,7 +217,7 @@ python3 test.py   --parties arbiter:10002 guest:9998 host:9999 host:10000 host:1
 
 - 项目源码路径 `PROJECT_PYTHON_DIR`
 - 当前配置文件路径
-- 当前任务和数据集
+- 当前任务和数据集 
 - 数据目录
 - 是否启用 MMLCC 聚合
 - wandb/swanlab 模式

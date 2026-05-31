@@ -39,6 +39,7 @@ from fate.ml.aggregator import AggregatorClientWrapper, AggregatorServerWrapper
 from fate_llm.algo.fedmkt.fedmkt_trainer import FedMKTTrainer
 from fate_llm.algo.fedmkt.fedmkt_data_collator import DataCollatorForFedMKT
 from fate_llm.algo.fedmkt.utils.dataset_sync_util import sync_dataset
+from fate_llm.algo.fedmkt.utils.local_metric_logger import local_tracking_enabled, log_local_metrics
 from fate_llm.algo.fedmkt.mmlcc import aggregate_aligned_slm_teachers_dataset
 
 
@@ -107,6 +108,40 @@ def _prepare_dispatched_model_for_trainer(model):
         model.model_parallel = True
 
 
+def _log_model_runtime_device(prefix, model, training_args=None):
+    try:
+        first_param_device = next(model.parameters()).device
+    except StopIteration:
+        first_param_device = "no_parameters"
+    except Exception as exc:
+        first_param_device = f"unavailable:{exc}"
+    args_device = getattr(training_args, "device", None)
+    local_rank = getattr(training_args, "local_rank", None)
+    logger.info(
+        f"[model-device][{prefix}] "
+        f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')} "
+        f"training_args.device={args_device} "
+        f"local_rank={local_rank} "
+        f"first_parameter_device={first_param_device} "
+        f"hf_device_map={_get_hf_device_map(model)}"
+    )
+
+
+def _force_training_args_device_from_env(training_args):
+    forced_device = os.environ.get("FEDMKT_FORCE_CUDA_DEVICE")
+    if forced_device in {None, ""}:
+        return training_args
+    device = torch.device(f"cuda:{int(forced_device)}")
+    torch.cuda.set_device(device)
+    training_args.__dict__["_setup_devices"] = device
+    training_args._n_gpu = 1
+    logger.info(
+        f"[training-args-device] forced training_args.device={device} "
+        f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}"
+    )
+    return training_args
+
+
 def _wandb_is_active(wandb_module):
     return (
         wandb_module is not None
@@ -116,6 +151,7 @@ def _wandb_is_active(wandb_module):
 
 
 def _swanlab_log(metrics):
+    log_local_metrics(metrics)
     try:
         import swanlab
         if getattr(swanlab, "log", None) is not None:
@@ -140,7 +176,7 @@ def _log_round_arc_accuracy(model, tokenizer, round_idx: int, prefix: str):
 
     swanlab_mode = os.environ.get("SWANLAB_MODE", "disabled").lower()
     swanlab_active = swanlab_mode not in {"", "disabled", "disable", "false", "0", "none"}
-    if not wandb_active and not swanlab_active:
+    if not wandb_active and not swanlab_active and not local_tracking_enabled():
         return
 
     from fate_llm.evaluate.arc_eval import evaluate_arc_mc_accuracy
@@ -404,6 +440,11 @@ class FedMKTSLM(FedMKTBase):
                 preprocess_logits_for_metrics=self.preprocess_logits_for_metrics,
                 **_tokenizer_init_kwargs(Seq2SeqTrainer, self.tokenizer),
             )
+            _log_model_runtime_device(
+                f"client_priv_trainer_round_{i}",
+                priv_trainer.model,
+                priv_data_training_args,
+            )
 
             logger.info(f"begin {i}-th private data training process")
             priv_trainer.train()
@@ -463,6 +504,11 @@ class FedMKTSLM(FedMKTBase):
 
             logger.info(f"begin {i}-th public logits kd process")
             fedmkt_trainer = self._init_trainer_for_distill(aligned_dataset)
+            _log_model_runtime_device(
+                f"client_kd_trainer_round_{i}",
+                fedmkt_trainer.model,
+                fedmkt_trainer.args,
+            )
             fedmkt_trainer.train()
             self.model = unwrap_model(fedmkt_trainer.model)
 
@@ -501,12 +547,14 @@ class FedMKTSLM(FedMKTBase):
     def _get_priv_data_training_args(self):
         pre_args = self.training_args.to_dict_with_client_priv_training_args()
         post_args = Seq2SeqTrainingArguments(**pre_args)
+        _force_training_args_device_from_env(post_args)
 
         return post_args
 
     def _get_pub_data_kd_training_args(self):
         pre_args = self.training_args.to_dict_with_client_kd_args()
         post_args = Seq2SeqTrainingArguments(**pre_args)
+        _force_training_args_device_from_env(post_args)
 
         return post_args
 
@@ -732,6 +780,7 @@ class FedMKTLLM(FedMKTBase):
     def _get_pub_data_kd_training_args(self):
         pre_args = self.training_args.to_dict_with_server_kd_args()
         post_args = Seq2SeqTrainingArguments(**pre_args)
+        _force_training_args_device_from_env(post_args)
 
         return post_args
 

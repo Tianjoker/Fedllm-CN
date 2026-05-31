@@ -14,14 +14,25 @@
 #  limitations under the License.
 #
 
-from fate_llm.algo.fedmkt.fedmkt import (
-    FedMKTTrainingArguments,
-    FedMKTSLM,
-    FedMKTLLM
-)
-
 __all__ = [
     "FedMKTSLM",
     "FedMKTLLM",
     "FedMKTTrainingArguments"
 ]
+
+
+def __getattr__(name):
+    if name not in __all__:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    from fate_llm.algo.fedmkt.fedmkt import (
+        FedMKTTrainingArguments,
+        FedMKTSLM,
+        FedMKTLLM,
+    )
+
+    return {
+        "FedMKTSLM": FedMKTSLM,
+        "FedMKTLLM": FedMKTLLM,
+        "FedMKTTrainingArguments": FedMKTTrainingArguments,
+    }[name]
